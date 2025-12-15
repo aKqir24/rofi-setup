@@ -1,219 +1,167 @@
-#!/bin/sh
-INTERFACE=$(ip -o link show | awk -F': ' '/wlx/ {print $2}')
 
-# Directory for temporary files related to iwd_rofi_menu
+#!/bin/bash
+
+# ====== CONFIGURATION ======
+INTERFACE=$(ip -o link show | awk -F': ' '/wlx/ {print $2}')
 TPATH="$HOME/.cache/iwd_rofi_menu_files"
 
-# Temporary files for storing network information
-RAW_NETWORK_FILE="$TPATH/iwd_rofi_menu_ssid_raw.txt"        # Stores raw output of 'iwctl get-networks'
-NETWORK_FILE="$TPATH/iwd_rofi_menu_ssid_structured.txt"		# Stores formatted output (SSID, Security, etc)
-RAW_METADATA_FILE="$TPATH/iwd_rofi_menu_metadata_raw.txt"           # Stores raw output of 'iwctl show'
-METADATA_FILE="$TPATH/iwd_rofi_menu_metadata_structured.txt"        # Stores formatted metadata output
-TEMP_PASSWORD_FILE="$TPATH/iwd_rofi_menu_temp_ssid_password.txt"    # Stores temporary password for networks
+RAW_NETWORK="$TPATH/ssid_raw.txt"
+NETWORK="$TPATH/ssid_formatted.txt"
+RAW_METADATA="$TPATH/metadata_raw.txt"
+METADATA="$TPATH/metadata_formatted.txt"
+TEMP_PASSWORD="$TPATH/temp_password.txt"
 
-# Rofi theme/settings files
-THEME_FILE="$HOME/.config/rofi/styles/wifi.rasi"
-PASS_WIN_THEME="$HOME/.config/rofi/styles/wifi_password.rasi"
-ROFI_DEFAULT_MODE="rofi -dmenu -mouse -i -theme $THEME_FILE"
+THEME="$HOME/.config/rofi/styles/wifi.rasi"
+PASS_THEME="$HOME/.config/rofi/styles/wifi_password.rasi"
+ROFI="rofi -dmenu -mouse -i -theme $THEME"
 
-# Function to clean up temporary files and directories
+MENU=("Refresh" "Enable Wi-Fi" "Disable Wi-Fi" "Network Info" "Scan Networks" "Connect" "Disconnect")
+
+mkdir -p "$TPATH"
+
+wifi=()
+ssid=()
+
+# ====== UTILITY FUNCTIONS ======
 clean_up() { [ -e "$TPATH" ] && rm -r "$TPATH"; }
+notify() { dunstctl close-all; notify-send "$1" "$2"; }
 
-# Menu options for the Wi-Fi management interface
-MENU_OPTIONS=( "Refresh" "Enable Wi-Fi" "Disable Wi-Fi" "Network Info" \
-               "Scan Networks" "Connect" "Disconnect" )
+power() { iwctl device "$INTERFACE" set-property Powered "$1"; main; }
 
-# Arrays to store Wi-Fi information
-wifi=()   # Stores formatted network info [Signal Strength, SSID, etc]
-ssid=()   # Stores SSIDs of available networks
-mkdir -p "$TPATH"  # Ensure the directory for temporary files exists
-
-# Function to power on/off the Wi-Fi interface
-power() { iwctl device "$INTERFACE" set-property Powered "$1" ; main; }
-
-# Close other notifiation after a new function call
-notify() { dunstctl close-all ; notify-send "$1" "$2";}
-
-# Function to disconnect from the currently connected network
-function disconnect() {
+disconnect() {
     iwctl station "$INTERFACE" disconnect
-    notify "Network Disconnected!!" "You are now disconnected to $selected_ssid..."
+    notify "Network Disconnected!" "Disconnected from $selected_ssid"
 }
 
-# Function to check the current status of the Wi-Fi interface
-function check() {
-    local status ; status=$(iwctl station "$INTERFACE" show | grep 'State' | awk '{print $2}')
-    if [[ -n "$status" ]]; then
-        interface="ON" ; [[ "$status" == "disconnected" ]] && wifi_status="OFF" || wifi_status="ON"
-    else
-        interface="OFF"
-    fi
-    local status_results=( "$interface" "$wifi_status" )
-    echo "${status_results[@]}"
+check_status() {
+    local status=$(iwctl station "$INTERFACE" show | awk '/State/ {print $2}')
+    local iface_status="OFF"
+    local wifi_status="OFF"
+    [[ -n "$status" ]] && iface_status="ON"
+    [[ "$status" != "disconnected" && -n "$status" ]] && wifi_status="ON"
+    echo "$iface_status $wifi_status"
 }
 
-# Function to fetch available networks and format the data for later use
-# It handles edge cases where SSID contains consecutive spaces.
-function helper_get_networks() {
-    # Scan for networks using iwctl
+# ====== NETWORK FUNCTIONS ======
+format_networks() {
     iwctl station "$INTERFACE" scan
-    iwctl station "$INTERFACE" get-networks > "$RAW_NETWORK_FILE"
-    {
-        # Add header for formatted file
-		echo "SSID,SECURITY,SIGNAL"
-        # Read the raw network file, remove non-printable characters, and process each line
-        local i=1 ; sed $'s/[^[:print:]\t]//g' "$RAW_NETWORK_FILE" | while read -r line; do
-            # Skip the first 4 lines (header info)
-            if (( i < 5 )); then
-                ((i++))
-                continue
+    iwctl station "$INTERFACE" get-networks > "$RAW_NETWORK"
 
-            # Process the 5th line differently based on Wi-Fi status
-            elif (( i == 5 )); then
-                # Adjust for different line format if connected/disconnected
-                wifi_status="$(check)" ; [[ ${wifi_status[1]} == "ON" ]] && line="${line:18}" || line="${line:9}"
-                # Replace consecutive spaces with commas for CSV format
+    {
+        echo "SSID,SECURITY,SIGNAL"
+        local i=1
+        sed $'s/[^[:print:]\t]//g' "$RAW_NETWORK" | while read -r line; do
+            ((i < 5)) && ((i++)) && continue
+            if (( i == 5 )); then
+                local status=($(check_status))
+                [[ ${status[1]} == "ON" ]] && line="${line:18}" || line="${line:9}"
                 echo "$line" | sed 's/  \+/,/g'
                 ((i++))
                 continue
             fi
-            # Skip empty lines and replace consecutive spaces with commas
-            [[ -z "$line" ]] && continue ; echo "$line" | sed 's/  \+/,/g'
+            [[ -z "$line" ]] && continue
+            echo "$line" | sed 's/  \+/,/g'
         done
-    } > "$NETWORK_FILE"
-	
-		
-	# Format signal strength and replace it with a visual representation of stars
-	sed -e 's/\*\*\*\*\[1;90m\[0m/[####] /g' -e 's/\*\*\*\[1;90m\*\[0m/[###-] /g' \
-		-e 's/\*\*\[1;90m\*\*\[0m/[##--] /g' -e 's/\*\[1;90m\*\*\*\[0m/[#---] /g' \
-		-e 's/\[1;90m\*\*\*\*\[0m/[----] /g' -e 's/\*\*\*\*/[####] /g' \
-		"$NETWORK_FILE" > "${NETWORK_FILE}.tmp" && mv "${NETWORK_FILE}.tmp" "$NETWORK_FILE"
+    } > "$NETWORK"
+
+    sed -e 's/\*\*\*\*\[1;90m\[0m/[####] /g' -e 's/\*\*\*\[1;90m\*\[0m/[###-] /g' \
+        -e 's/\*\*\[1;90m\*\*\[0m/[##--] /g' -e 's/\*\[1;90m\*\*\*\[0m/[#---] /g' \
+        -e 's/\[1;90m\*\*\*\*\[0m/[----] /g' -e 's/\*\*\*\*/[####] /g' \
+        "$NETWORK" > "${NETWORK}.tmp" && mv "${NETWORK}.tmp" "$NETWORK"
 }
 
-# Function to retrieve and store the formatted list of available networks
-# It reads from the formatted network file and stores SSIDs, Security, and Signal Strength
-function get_networks() {
-	ssid=() ; local security=() ; local signal=()
-    helper_get_networks ; local local_file="$NETWORK_FILE"
-
-    # Read the CSV formatted file and store each column into separate arrays
+get_networks() {
+    ssid=(); local security=(); local signal=(); wifi=()
+    format_networks
     while IFS=',' read -r col1 col2 col3 col4; do
-		if [[ "$col1" != "0m> [0m" ]]; then
-			ssid+=("$col1") security+=("$col2") signal+=("$col3")
-		else
-			ssid+=("$col2") security+=("$col3") signal+=("$col4")
-		fi
-    done < <(tail -n +2 $local_file)	
-    # Combine the data into the 'wifi' array
-    for ((i = 0; i < ${#ssid[@]}; i++)); do
+        if [[ "$col1" != "0m> [0m" ]]; then
+            ssid+=("$col1"); security+=("$col2"); signal+=("$col3")
+        else
+            ssid+=("$col2"); security+=("$col3"); signal+=("$col4")
+        fi
+    done < <(tail -n +2 "$NETWORK")
+
+    for i in "${!ssid[@]}"; do
         wifi+=("${signal[$i]} ${ssid[$i]} (${security[$i]})")
-    done	
-	[[ "${wifi[2]}" == ' works available ()' ]] && wifi[2]=' No networks available!!'
+    done
+    [[ "${wifi[2]}" == ' works available ()' ]] && wifi[2]='No networks available!!'
 }
 
-# Function to connect to a selected Wi-Fi network
-# It handles both known and unknown networks, including entering a passphrase for secure networks
-function connect_to_network() {
-    selected_ssid="${ssid[$1]}" ; notify "Connecting..." "Attempting to access $selected_ssid!!"
-    known=$(iwctl known-networks list | grep -w "$selected_ssid")
-	
-	# Notify function when connecting... opened networks
-	function notify_connection() {
-		if [[ -z "$connection_output" ]]; then
-            notify "Connection Was Successful!!" "You are now connected to $selected_ssid!!" ; return 
-        else 
-			if [[ $connection_output == "Terminate" ]]; then
-				notify "The password was incorrect!!" "Retrying to connect: Please retype the password..."
-				known-networks "$selected_ssid" forget && sleep 2
-				get_password
-			else
-				notify "Connection Was Unsuccessful!!" "Something went wrong, please try again!!"
-			fi
-			return 
-        fi
-	}
+connect_to_network() {
+    selected_ssid="${ssid[$1]}"
+    notify "Connecting..." "Attempting to access $selected_ssid"
 
-	function get_password() {
-	# Prompt for a password if the network is not open
-		(rofi -dmenu -password -p "  " -theme "$PASS_WIN_THEME") > "$TEMP_PASSWORD_FILE"
-		connection_output=$(timeout 2 iwctl station "$INTERFACE" connect "$selected_ssid" --passphrase="$(<"$TEMP_PASSWORD_FILE")" 2>&1)
-		notify_connection
-	}
+    known=$(iwctl known-networks list | grep -w "$selected_ssid")
+    local connection_output=""
+
+    notify_connection() {
+        if [[ -z "$connection_output" ]]; then
+            notify "Connected!" "You are now connected to $selected_ssid"
+        elif [[ $connection_output == "Terminate" ]]; then
+            notify "Incorrect Password" "Retrying..."
+            iwctl known-networks "$selected_ssid" forget
+            sleep 2
+            get_password
+        else
+            notify "Connection Failed" "Please try again"
+        fi
+    }
+
+    get_password() {
+        (rofi -dmenu -password -p "  " -theme "$PASS_THEME") > "$TEMP_PASSWORD"
+        connection_output=$(timeout 2 iwctl station "$INTERFACE" connect "$selected_ssid" --passphrase="$(<"$TEMP_PASSWORD")" 2>&1)
+        notify_connection
+    }
 
     if [[ -n "$known" ]]; then
-        # Attempt to connect to a known network
-        local connection_output 
-		connection_output=$(timeout 2 iwctl station "$INTERFACE" connect "$selected_ssid" 2>&1)
-        notify_connection 
+        connection_output=$(timeout 2 iwctl station "$INTERFACE" connect "$selected_ssid" 2>&1)
+        notify_connection
     else
-		# Attempting to connect to a not known network
-		if iwctl station "$INTERFACE" get-networks | grep "$selected_ssid" | grep 'open'; then
-			connection_output=$(iwctl station "$INTERFACE" connect "$selected_ssid" 2>&1)	
-			notify_connection
-		else
-			get_password
-		fi
+        if iwctl station "$INTERFACE" get-networks | grep -q "$selected_ssid" | grep -q 'open'; then
+            connection_output=$(iwctl station "$INTERFACE" connect "$selected_ssid" 2>&1)
+            notify_connection
+        else
+            get_password
+        fi
     fi
 }
 
-# Function to display detailed Wi-Fi metadata (e.g., signal strength, etc.)
-function helper_wifi_status() {
-    iwctl station "$INTERFACE" show > "$RAW_METADATA_FILE"
+# ====== METADATA FUNCTIONS ======
+fetch_wifi_metadata() {
+    iwctl station "$INTERFACE" show > "$RAW_METADATA"
     {
-        # Add options to return or refresh the menu
-        echo "󱚷  Return" ; echo "󱛄  Refresh" ; local i=1 # Read the raw metadata file and process each line
-        sed $'s/[^[:print:]\t]//g' "$RAW_METADATA_FILE" | while read -r line; do
-            (( i <= 5 )) && ((i++)) && continue
-            # Skip empty lines and replace consecutive spaces with commas
-            [[ -z "$line" ]] && continue ; echo "$line" | sed 's/  \+/,/g'
+        echo "󱚷  Return"
+        echo "󱛄  Refresh"
+        local i=1
+        sed $'s/[^[:print:]\t]//g' "$RAW_METADATA" | while read -r line; do
+            ((i <= 5)) && ((i++)) && continue
+            [[ -z "$line" ]] && continue
+            echo "$line" | sed 's/  \+/,/g'
         done
-    } > "$METADATA_FILE"
+    } > "$METADATA"
 
-    # Extract the second column into a list of values
-    while IFS=, read -r value; do
-        local list+=("$value")
-    done < "$METADATA_FILE"
+    local list=()
+    while IFS=, read -r value; do list+=("$value"); done < "$METADATA"
     echo "${list[@]}"
 }
 
-# Function to display Wi-Fi metadata in a user-friendly format and copy selected value to clipboard
-function wifi_status() {
-    # Fetch Wi-Fi metadata values
-    local values ; values=($(helper_wifi_status))
-
-    # Adjust the display of metadata dynamically based on the length of keys
-    local data ; data=$(awk -F',' '
-    BEGIN { max_key_length = 10; }
-    {
-        # Calculate the maximum length of the first column for formatting
-        if (length($1) > max_key_length) max_key_length = length($1);
-        keys[NR] = $1;
-        values[NR] = $2;
-    }
-    END {
-        # Format and print each row with aligned columns
-        for (i = 1; i <= NR; i++) {
-            printf "%-*s  %s\n", max_key_length, keys[i], values[i];
-        }
-    }' "$METADATA_FILE")
-    # Use rofi to allow the user to select a metadata field
-    local selected_index ; selected_index=$(echo -e "$data" | $ROFI_DEFAULT_MODE -format i)
-
-    # Handle the selected index
-    (( selected_index == 0 )) && return  # Return if 'Return' option is selected
-    (( selected_index == 1 )) && wifi_status ; return  # Refresh if 'Refresh' option is selected
-
-    # Copy the selected field to clipboard
-    echo "${values["$selected_index"]}" | xclip -selection clipboard
+wifi_status() {
+    local values=($(fetch_wifi_metadata))
+    local data
+    data=$(awk -F',' 'BEGIN{max=10} {if(length($1)>max) max=length($1); keys[NR]=$1; vals[NR]=$2} END{for(i=1;i<=NR;i++) printf "%-*s  %s\n", max, keys[i], vals[i]}' "$METADATA")
+    local selected=$(echo -e "$data" | $ROFI -format i)
+    (( selected == 0 )) && return
+    (( selected == 1 )) && wifi_status && return
+    echo "${values["$selected"]}" | xclip -selection clipboard
 }
 
-# Function to scan for available Wi-Fi networks and allow the user to connect to one
+# ====== SCAN FUNCTION ======
 function scan() {
     # Continue scanning if 'Rescan' option is selected
     local selected_wifi_index=1
     while (( selected_wifi_index == 1 )); do
         notify "Scanning..." "For nearby networks!!"
-        wifi=("󱚷  Return") ; wifi+=("󱛇  Rescan") ; get_networks
+        wifi=("󱚷  Retur") ; wifi+=("󱛇  Rescan") ; get_networks
         selected_wifi_index=$( printf "%s\n" "${wifi[@]}" | $ROFI_DEFAULT_MODE -format i)
     done
 
@@ -223,43 +171,38 @@ function scan() {
     fi
 }
 
-# Function to display the Rofi menu and handle user choices
-function rofi_cmd() {
-    local options="${MENU_OPTIONS[0]}" ; local status=($(check))
+# ====== MENU FUNCTIONS ======
+rofi_menu() {
+    local options="${MENU[0]}"
+    local status=($(check_status))
     if [[ "${status[0]}" == "OFF" ]]; then
-        options+="\n${MENU_OPTIONS[1]}"
+        options+="\n${MENU[1]}"
     else
-        options+="\n${MENU_OPTIONS[2]}"
-
-        if [[ "${status[1]}" == "OFF" ]]; then
-            options+="\n${MENU_OPTIONS[5]}"
-        else
-            options+="\n${MENU_OPTIONS[3]}"
-            options+="\n${MENU_OPTIONS[4]}"
-            options+="\n${MENU_OPTIONS[6]}"
-        fi
+        options+="\n${MENU[2]}"
+        [[ "${status[1]}" == "OFF" ]] && options+="\n${MENU[5]}" || options+="\n${MENU[3]}\n${MENU[4]}\n${MENU[6]}"
     fi
-    local choice ; choice=$(echo -e "$options" | $ROFI_DEFAULT_MODE) ; echo "$choice"
+    echo -e "$options" | $ROFI
 }
 
-# Function to run the selected command from the Rofi menu
-function run_cmd() {
+run_cmd() {
     case "$1" in
-        "${MENU_OPTIONS[0]}")  # Refresh menu
-            main ;;
-        "${MENU_OPTIONS[1]}")  # Turn on Wi-Fi
-            power on ;;
-        "${MENU_OPTIONS[2]}")  # Turn off Wi-Fi
-            power off ;;
-        "${MENU_OPTIONS[3]}")  # Show Wi-Fi status
-            wifi_status ; main ;;
-        "${MENU_OPTIONS[4]}" | "${MENU_OPTIONS[5]}")  # List networks | Scan networks
-            scan ; main ;;
-        "${MENU_OPTIONS[6]}")  # Disconnect
-            disconnect ; main ;;
+        "${MENU[0]}") main ;;
+        "${MENU[1]}") power on ;;
+        "${MENU[2]}") power off ;;
+        "${MENU[3]}") wifi_status; main ;;
+        "${MENU[4]}"|"${MENU[5]}") scan; main ;;
+        "${MENU[6]}") disconnect; main ;;
         *) return ;;
     esac
 }
 
-# Main function to start the script and display the menu
-main() { local chosen_option ; chosen_option=$(rofi_cmd) ; run_cmd "$chosen_option" ; } ; main ;clean_up
+# ====== MAIN LOOP ======
+main() { 
+    local choice
+    choice=$(rofi_menu)
+    run_cmd "$choice"
+}
+
+main
+clean_up
+
