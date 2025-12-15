@@ -120,15 +120,30 @@ function connect_to_network() {
 	# Notify function when connecting... opened networks
 	function notify_connection() {
 		if [[ -z "$connection_output" ]]; then
-            notify "Connection Was Successful!!" "You are now connected to $selected_ssid!!" ; return
-        else
-            notify "Connection Was Unsuccessful!!" "$selected_ssid may not be available for a while, please try again!!" ; return
+            notify "Connection Was Successful!!" "You are now connected to $selected_ssid!!" ; return 
+        else 
+			if [[ $connection_output == "Terminate" ]]; then
+				notify "The password was incorrect!!" "Retrying to connect: Please retype the password..."
+				known-networks "$selected_ssid" forget; sleep 1
+				get_password
+			else
+				notify "Connection Was Unsuccessful!!" "Something went wrong, please try again!!"
+			fi
+			return 
         fi
+	}
+
+	function get_password() {
+	# Prompt for a password if the network is not open
+		(rofi -dmenu -password -p "  " -theme "$PASS_WIN_THEME") > "$TEMP_PASSWORD_FILE"
+		connection_output=$(iwctl station "$INTERFACE" connect "$selected_ssid" --passphrase="$(<"$TEMP_PASSWORD_FILE")" 2>&1)
+		notify_connection
 	}
 
     if [[ -n "$known" ]]; then
         # Attempt to connect to a known network
-        local connection_output ; connection_output=$(timeout 10 iwctl station "$INTERFACE" connect "$selected_ssid" 2>&1)
+        local connection_output 
+		connection_output=$(timeout 2 iwctl station "$INTERFACE" connect "$selected_ssid" 2>&1)
         notify_connection 
     else
 		# Attempting to connect to a not known network
@@ -136,16 +151,7 @@ function connect_to_network() {
 			connection_output=$(iwctl station "$INTERFACE" connect "$selected_ssid" 2>&1)	
 			notify_connection
 		else
-			# Prompt for a password if the network is not open
-			(rofi -dmenu -password -p "  " -theme "$PASS_WIN_THEME") > "$TEMP_PASSWORD_FILE"
-			connection_output=$(iwctl station "$INTERFACE" connect "$selected_ssid" --passphrase="$(<"$TEMP_PASSWORD_FILE")" 2>&1)
-			
-			# Notify using the connection_output in psk security
-			if [[ -n "$connection_output" ]]; then
-				notify "Connection Was Unsuccessful!!" "Something went wrong maybe the password, please try again!!"
-			else
-				notify "Connection Was Successful!!" "You are now connected to $selected_ssid!!"
-			fi
+			get_password
 		fi
     fi
 }
@@ -251,10 +257,9 @@ function run_cmd() {
             scan ; main ;;
         "${MENU_OPTIONS[6]}")  # Disconnect
             disconnect ; main ;;
-        *)
-            return ;;
+        *) return ;;
     esac
 }
 
 # Main function to start the script and display the menu
-main() { local chosen_option ; chosen_option=$(rofi_cmd) ; run_cmd "$chosen_option" ; } ; main ; clean_up
+main() { local chosen_option ; chosen_option=$(rofi_cmd) ; run_cmd "$chosen_option" ; } ; main ;clean_up
