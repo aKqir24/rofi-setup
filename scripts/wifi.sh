@@ -124,7 +124,7 @@ function connect_to_network() {
         else 
 			if [[ $connection_output == "Terminate" ]]; then
 				notify "The password was incorrect!!" "Retrying to connect: Please retype the password..."
-				known-networks "$selected_ssid" forget; sleep 1
+				known-networks "$selected_ssid" forget && sleep 2
 				get_password
 			else
 				notify "Connection Was Unsuccessful!!" "Something went wrong, please try again!!"
