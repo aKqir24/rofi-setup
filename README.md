@@ -21,7 +21,14 @@ https://github.com/user-attachments/assets/ab7b87f9-fe97-48f2-b575-f2621c11c761
     ```
 
 # Usage
+
+- With my dotfiles
 ```bash
     bash show.sh \
         [ launcher, emoji, bluetooth, powermenu, wifi ]
 ```
+
+- Manually
+```bash 
+    # You might need to configure the theme
+    sh [wifi.sh, bluetooth.sh]
